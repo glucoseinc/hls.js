@@ -164,37 +164,71 @@ class XhrLoader implements Loader<LoaderContext> {
         const status = xhr.status;
         // http status between 200 to 299 are all successful
         if (status >= 200 && status < 300) {
-          stats.loading.end = Math.max(
-            self.performance.now(),
-            stats.loading.first
-          );
-          let data;
-          let len: number;
-          if (context.responseType === 'arraybuffer') {
-            data = xhr.response;
-            len = data.byteLength;
-          } else {
-            data = xhr.responseText;
-            len = data.length;
-          }
-          stats.loaded = stats.total = len;
+          try {
+            stats.loading.end = Math.max(
+              self.performance.now(),
+              stats.loading.first
+            );
+            let data;
+            let len: number;
+            if (context.responseType === 'arraybuffer') {
+              data = xhr.response;
+              len = data.byteLength;
+            } else {
+              data = xhr.responseText;
+              len = data.length;
+            }
+            stats.loaded = stats.total = len;
 
-          if (!this.callbacks) {
-            return;
-          }
-          const onProgress = this.callbacks.onProgress;
-          if (onProgress) {
-            onProgress(stats, context, data, xhr);
-          }
-          if (!this.callbacks) {
-            return;
-          }
-          const response = {
-            url: xhr.responseURL,
-            data: data,
-          };
+            if (!this.callbacks) {
+              return;
+            }
+            const onProgress = this.callbacks.onProgress;
+            if (onProgress) {
+              onProgress(stats, context, data, xhr);
+            }
+            if (!this.callbacks) {
+              return;
+            }
+            const response = {
+              url: xhr.responseURL,
+              data: data,
+            };
 
-          this.callbacks.onSuccess(response, stats, context, xhr);
+            this.callbacks.onSuccess(response, stats, context, xhr);
+          } catch (e) {
+            logger.warn(
+              `Exception:${e} while loading ${context.url}, retrying in ${this.retryDelay}... (stats.retry: ${stats.retry})`
+            );
+
+            if (stats.retry >= config.maxRetry) {
+              logger.error(`${status} while loading ${context.url}`);
+              this.callbacks!.onError(
+                { code: status, text: xhr.statusText },
+                context,
+                xhr
+              );
+            } else {
+              // retry
+              logger.warn(`xhr.response: ${xhr.response}`);
+
+              // abort and reset internal state
+              this.abortInternal();
+              this.loader = null;
+              // schedule retry
+              self.clearTimeout(this.retryTimeout);
+              this.retryTimeout = self.setTimeout(
+                this.loadInternal.bind(this),
+                this.retryDelay
+              );
+              // set exponential backoff
+              this.retryDelay = Math.min(
+                2 * this.retryDelay,
+                config.maxRetryDelay
+              );
+              stats.retry++;
+            }
+          }
         } else {
           // if max nb of retries reached or if http status between 400 and 499 (such error cannot be recovered, retrying is useless), return error
           if (
